@@ -48,6 +48,15 @@ async fn create_hls_session(
     id: Uuid,
     q: &api::HlsVideoQuery,
 ) -> Result<HlsSessionResult> {
+    if state
+        .ctx
+        .config
+        .direct_only
+    {
+        return Ok(HlsSessionResult::Forbidden(
+            "Direct-only mode forbids HLS processing",
+        ));
+    }
     let play_session_id = q
         .play_session_id
         .clone()

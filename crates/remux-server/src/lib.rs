@@ -56,6 +56,7 @@ mod common;
 pub mod jellyfin_client;
 pub use common::stable_media_uuid;
 pub mod db;
+mod direct_only;
 #[cfg(feature = "desktop")]
 pub mod embedded_static;
 pub mod intro;
@@ -302,7 +303,7 @@ pub async fn init_app(
     // Probe hardware and persist results at startup.
     // vaapi_driver is always re-detected (regardless of auto_detect) because
     // it is a runtime property of the host, not a user preference.
-    {
+    if !config.direct_only {
         let mut enc_opts = db::Settings::get_encoding_config(&conn).await?;
         if enc_opts
             .auto_detect_hardware_acceleration
@@ -327,9 +328,10 @@ pub async fn init_app(
 
     let saved_config = db::Settings::get_config(&conn).await?;
 
-    let p2p_enabled = saved_config
-        .p2p_enabled
-        .unwrap_or(true);
+    let p2p_enabled = !config.direct_only
+        && saved_config
+            .p2p_enabled
+            .unwrap_or(true);
     let torrent_mgr = if p2p_enabled {
         let mgr = torrent::TorrentManager::from_config(&config).await?;
         mgr.update_limits(
@@ -442,6 +444,11 @@ pub async fn init_app(
         .nest_service("/admin", admin)
         .nest_service("/web", web_client.clone())
         .nest_service("/jellyfin", web_client)
+        .layer(axum::middleware::from_fn_with_state(
+            ctx.config
+                .direct_only,
+            direct_only::guard,
+        ))
         .with_state(state);
 
     let router = router
@@ -509,6 +516,13 @@ impl AppContext {
     }
 
     pub async fn set_p2p_enabled(&self, enabled: bool) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !enabled
+                || !self
+                    .config
+                    .direct_only,
+            "P2P is forbidden in direct-only mode"
+        );
         let current = self
             .torrent
             .read()
@@ -582,6 +596,10 @@ fn default_torrent_http_port() -> u16 {
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Config {
+    /// Serve metadata and direct HTTP(S) redirects only. Never open media URLs.
+    /// An operator setting, independent of mutable addon/user encoding settings.
+    #[serde(default)]
+    pub direct_only: bool,
     #[serde(default = "default_data_dir")]
     pub data_dir: std::path::PathBuf,
     /// `None` means derive from `data_dir` — call `resolve()` after loading.
@@ -747,6 +765,7 @@ impl Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            direct_only: false,
             data_dir: default_data_dir(),
             database_url: None,
             torrent_data_dir: None,

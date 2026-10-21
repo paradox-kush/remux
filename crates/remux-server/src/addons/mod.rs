@@ -1562,6 +1562,16 @@ impl AddonService {
             .into_iter()
             .filter(|a| a.enabled)
         {
+            if config.direct_only
+                && !crate::direct_only::addon_allowed(
+                    &addon
+                        .preset
+                        .kind,
+                )
+            {
+                warn!(kind = %addon.preset.kind, "preset disabled by direct-only operator policy");
+                continue;
+            }
             let Some(preset) = presets
                 .iter()
                 .find(|p| {

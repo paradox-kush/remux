@@ -5,7 +5,7 @@ use axum::{
 use remux_macros::get;
 use uuid::Uuid;
 
-use crate::{OptionExt, ResultExt};
+use crate::{IntoApiError, OptionExt, ResultExt};
 use axum_anyhow::ApiResult as Result;
 
 use crate::{AppState, db, stream::StreamDescriptor};
@@ -21,6 +21,14 @@ pub async fn stream_proxy(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<impl IntoResponse> {
+    if state
+        .ctx
+        .config
+        .direct_only
+    {
+        return Err(anyhow::anyhow!("media proxy disabled")
+            .context_forbidden("Direct-only mode forbids media proxying"));
+    }
     let media = db::Media::get_by_id(
         &state
             .ctx

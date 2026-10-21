@@ -1,0 +1,16 @@
+# POC build: no user data or secrets in the build context.
+FROM rust@sha256:7e9eb23ac694dda816c76933ab63b2703e6becbf3b10da90970124656788d47b AS build
+RUN apt-get update && apt-get install -y --no-install-recommends cmake && rm -rf /var/lib/apt/lists/*
+WORKDIR /source
+COPY . .
+ENV CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0
+RUN cargo build --locked -p remux-server -j 2 && cargo test --locked -p remux-server --lib direct_only -j 2 && cargo test --locked -p remux-server --lib http_redirect_stream_ -j 2
+
+FROM ghcr.io/lostb1t/remux@sha256:4ab6970d08f546cf014c1b9405d72f1856f587b2f9be92bc5137ff541d071bce
+COPY --from=build /source/target/debug/remux-server /app/remux-server
+COPY --chmod=0555 docker/direct-only-entrypoint.sh docker/deny-media-tool.sh /app/
+COPY . /usr/share/remux/source
+ENV DIRECT_ONLY=true DISABLE_DHT=true DISABLE_STARTUP_TASKS=true
+USER 10001:10001
+ENTRYPOINT ["/app/direct-only-entrypoint.sh"]
+CMD []

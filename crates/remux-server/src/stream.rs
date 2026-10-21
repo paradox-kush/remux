@@ -1,4 +1,4 @@
-use crate::ResultExt;
+use crate::{IntoApiError, ResultExt};
 use async_trait::async_trait;
 use axum::{body::Body, http::HeaderMap, response::Response};
 use axum_anyhow::ApiResult as Result;
@@ -738,7 +738,15 @@ fn parse_open_or_finite_range(range: &str) -> Option<(u64, Option<u64>)> {
 
 #[async_trait]
 impl StreamSource for HttpSource {
-    async fn serve(&self, _state: &AppState, headers: &HeaderMap) -> Result<Response> {
+    async fn serve(&self, state: &AppState, headers: &HeaderMap) -> Result<Response> {
+        if state
+            .ctx
+            .config
+            .direct_only
+        {
+            return Err(anyhow::anyhow!("media proxy disabled")
+                .context_forbidden("Direct-only mode forbids media proxying"));
+        }
         self.serve_inner(headers, false)
             .await
     }
@@ -746,7 +754,15 @@ impl StreamSource for HttpSource {
 
 #[async_trait]
 impl StreamSource for LocalSource {
-    async fn serve(&self, _state: &AppState, headers: &HeaderMap) -> Result<Response> {
+    async fn serve(&self, state: &AppState, headers: &HeaderMap) -> Result<Response> {
+        if state
+            .ctx
+            .config
+            .direct_only
+        {
+            return Err(anyhow::anyhow!("local media disabled")
+                .context_forbidden("Direct-only mode forbids local media"));
+        }
         let file = tokio::fs::File::open(&self.path)
             .await
             .context_not_found("file not found")?;
@@ -805,6 +821,14 @@ impl StreamSource for LocalSource {
 #[async_trait]
 impl StreamSource for TorrentSource {
     async fn serve(&self, state: &AppState, headers: &HeaderMap) -> Result<Response> {
+        if state
+            .ctx
+            .config
+            .direct_only
+        {
+            return Err(anyhow::anyhow!("P2P disabled")
+                .context_forbidden("Direct-only mode forbids P2P"));
+        }
         let torrent = state
             .ctx
             .torrent

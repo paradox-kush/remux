@@ -259,6 +259,19 @@ pub async fn create_addon(
     _session: auth::AdminSession,
     Json(mut payload): Json<CreateAddonRequest>,
 ) -> Result<(StatusCode, Json<AddonDto>)> {
+    if state
+        .ctx
+        .config
+        .direct_only
+        && !crate::direct_only::addon_allowed(
+            &payload
+                .preset
+                .kind,
+        )
+    {
+        return Err(anyhow::anyhow!("unsupported preset")
+            .context_forbidden("This preset is unsupported in direct-only mode"));
+    }
     let presets = registered_presets();
     let preset = presets
         .iter()
@@ -410,6 +423,20 @@ pub async fn update_addon(
     .await?
     .context_not_found("Addon not found")?;
 
+    if state
+        .ctx
+        .config
+        .direct_only
+        && !crate::direct_only::addon_allowed(
+            &addon
+                .preset
+                .kind,
+        )
+        && (enabled == Some(true) || config.is_some())
+    {
+        return Err(anyhow::anyhow!("unsupported preset")
+            .context_forbidden("This preset is unsupported in direct-only mode"));
+    }
     // Keep these Options available below: explicit fields take precedence over
     // capability values derived when the config changes.
     if let Some(resources) = &resources {

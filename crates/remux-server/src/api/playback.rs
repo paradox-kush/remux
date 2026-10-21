@@ -519,7 +519,17 @@ async fn items_playbackinfo_inner(
             }
         }
     );
-    let probed = probed?;
+    let probed = if state
+        .ctx
+        .config
+        .direct_only
+    {
+        probed.context_bad_request(
+            "No directly playable HTTP source is available in direct-only mode",
+        )?
+    } else {
+        probed?
+    };
     let item_runtime_seconds = subtitle_media
         .as_ref()
         .and_then(|item| item.runtime);
@@ -659,21 +669,33 @@ async fn items_playbackinfo_inner(
             "playback decision"
         );
 
-        match build_transcode_decision(
-            &source,
-            &transcode_reasons,
-            effective_sub_idx,
-            &q,
-            &session,
-            &cfg,
-            allow_subtitle_extraction,
-        ) {
+        let decision = if state
+            .ctx
+            .config
+            .direct_only
+        {
+            TranscodeDecision::DirectPlay
+        } else {
+            build_transcode_decision(
+                &source,
+                &transcode_reasons,
+                effective_sub_idx,
+                &q,
+                &session,
+                &cfg,
+                allow_subtitle_extraction,
+            )
+        };
+        match decision {
             TranscodeDecision::DirectPlay => {
                 // These are server capabilities, not the mode selected for this
                 // request. Keep permitted processing available so the client can
                 // re-request it later (for example, for subtitle burn-in).
-                source.supports_transcoding =
-                    playback_permissions.processing_available();
+                source.supports_transcoding = !state
+                    .ctx
+                    .config
+                    .direct_only
+                    && playback_permissions.processing_available();
                 source.supports_direct_play = true;
                 // Jellyfin's direct stream is the unchanged file through the
                 // server (`Static=true`), not a remux, so no processing
@@ -1389,6 +1411,14 @@ async fn videos_stream_inner(
     let media = match media {
         Ok(m) => m,
         Err(e) => {
+            if state
+                .ctx
+                .config
+                .direct_only
+            {
+                return Err(anyhow!("no directly playable source")
+                    .context_not_found("No directly playable source"));
+            }
             tracing::warn!(
                 item = %id,
                 media_source = ?q.media_source_id,
@@ -1416,6 +1446,14 @@ async fn videos_stream_inner(
         .stream_info
         .clone()
     else {
+        if state
+            .ctx
+            .config
+            .direct_only
+        {
+            return Err(anyhow!("no direct source descriptor")
+                .context_not_found("No directly playable source"));
+        }
         tracing::warn!(
             item = %id,
             media = %media.id,
@@ -1424,6 +1462,35 @@ async fn videos_stream_inner(
         return Ok(no_streams_response().into_response());
     };
     let descriptor = si.descriptor;
+    if state
+        .ctx
+        .config
+        .direct_only
+    {
+        let url = crate::direct_only::redirect_url(&descriptor)
+            .context_forbidden("This source requires media proxying and is unsupported in direct-only mode")?;
+        let requested_processing = q
+            .video_codec
+            .as_deref()
+            .is_some_and(|v| v != "copy")
+            || q.audio_codec
+                .as_deref()
+                .is_some_and(|v| v != "copy")
+            || q.subtitle_method
+                .as_deref()
+                == Some("Encode")
+            || (!q
+                .static_
+                .unwrap_or(false)
+                && q.start_time_ticks
+                    .unwrap_or(0)
+                    > 0);
+        if requested_processing {
+            return Err(anyhow!("server-side processing is forbidden")
+                .context_forbidden("Direct-only mode cannot process media"));
+        }
+        return Ok(axum::response::Redirect::temporary(url).into_response());
+    }
     let encoding_opts = crate::db::Settings::get_encoding_config(
         &state
             .ctx

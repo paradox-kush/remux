@@ -17,6 +17,12 @@ const INTRO_IDX_KEY: &str = "intro:sequential_idx";
 /// and remove stale Intro items whose files no longer exist.
 /// Resets `intro_idx` to 0 on every call.
 pub async fn sync_intros(ctx: &AppContext) -> Result<()> {
+    if ctx
+        .config
+        .direct_only
+    {
+        return Ok(());
+    }
     let opts = db::Settings::get_intro_config(&ctx.db).await?;
 
     let existing = all_intros(&ctx.db).await?;

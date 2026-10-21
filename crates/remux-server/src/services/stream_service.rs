@@ -649,6 +649,26 @@ impl StreamService {
         prefs: DefaultStreamPrefs<'_>,
     ) -> anyhow::Result<ProbedStreams> {
         let mut sel = self.select_streams();
+        if self
+            .ctx
+            .config
+            .direct_only
+        {
+            sel.candidates
+                .retain(|stream| {
+                    stream
+                        .stream_info
+                        .as_ref()
+                        .is_some_and(|si| {
+                            crate::direct_only::redirect_url(&si.descriptor).is_ok()
+                        })
+                });
+            anyhow::ensure!(
+                !sel.candidates
+                    .is_empty(),
+                "no source meets the direct-only policy"
+            );
+        }
         let (candidates, extraction) = self
             .rank_candidates(std::mem::take(&mut sel.candidates), ranking, prefs)
             .await;
@@ -763,8 +783,11 @@ impl StreamService {
             // of any other candidate could not change the order — only the
             // one auto-play plays is probed. A stale H.264 result elsewhere
             // gets its refresh when a client requests that stream directly.
-            let skip_probe =
-                preferred_probe_id.is_some_and(|preferred| stream.id != preferred);
+            let skip_probe = self
+                .ctx
+                .config
+                .direct_only
+                || preferred_probe_id.is_some_and(|preferred| stream.id != preferred);
             // A filename guess is never a completed probe — it must not skip
             // submitting a freshly-probed result to RemuxDB.
             let was_cached = stream
@@ -888,9 +911,29 @@ impl StreamService {
                 source: probe_source,
             });
 
-            let remuxdb_enabled = probe_cfg
-                .remuxdb_enabled
-                .unwrap_or(true);
+            if self
+                .ctx
+                .config
+                .direct_only
+            {
+                source.path = effective_stream
+                    .stream_info
+                    .as_ref()
+                    .and_then(|si| {
+                        crate::direct_only::redirect_url(&si.descriptor).ok()
+                    })
+                    .map(str::to_owned);
+                source.protocol = api::MediaProtocol::Http;
+                source.is_remote = true;
+                source.supports_probing = false;
+            }
+            let remuxdb_enabled = !self
+                .ctx
+                .config
+                .direct_only
+                && probe_cfg
+                    .remuxdb_enabled
+                    .unwrap_or(true);
             let is_remuxdb_kind = item
                 .as_ref()
                 .map_or(false, |it| {
@@ -924,18 +967,22 @@ impl StreamService {
                 }
             }
 
-            let allow_subtitle_extraction = match extraction.get(&effective_stream.id) {
-                Some(allow) => *allow,
-                None => {
-                    effective_stream
-                        .allows_subtitle_extraction(
-                            &self
-                                .ctx
-                                .db,
-                        )
-                        .await
-                }
-            };
+            let allow_subtitle_extraction = !self
+                .ctx
+                .config
+                .direct_only
+                && match extraction.get(&effective_stream.id) {
+                    Some(allow) => *allow,
+                    None => {
+                        effective_stream
+                            .allows_subtitle_extraction(
+                                &self
+                                    .ctx
+                                    .db,
+                            )
+                            .await
+                    }
+                };
             results.push(ProbeResult {
                 source,
                 stream,
