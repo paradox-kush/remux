@@ -127,7 +127,31 @@ impl ItemsQueryResultBuilder {
         let mut items: Vec<api::BaseItemDto> = match self.items {
             ItemsSource::Raw(media) => media
                 .into_iter()
-                .map(|m| {
+                .filter(|m| {
+                    m.kind != db::MediaKind::Stream
+                        || m.user_id
+                            .is_none()
+                        || m.user_id
+                            == Some(
+                                self.session
+                                    .user
+                                    .id,
+                            )
+                })
+                .map(|mut m| {
+                    if let Some(sources) = &mut m.sources {
+                        sources.retain(|source| {
+                            source
+                                .user_id
+                                .is_none()
+                                || source.user_id
+                                    == Some(
+                                        self.session
+                                            .user
+                                            .id,
+                                    )
+                        });
+                    }
                     let mut dto = api::db_media_to_item(m, self.hide_sources);
                     if self.apply_permissions {
                         apply_permissions(
@@ -1860,6 +1884,21 @@ async fn item_for_user(
                     .db,
             )
             .await?;
+        let raw = raw
+            .into_iter()
+            .filter(|source| {
+                !state
+                    .ctx
+                    .config
+                    .tenant_streams
+                    || source.user_id
+                        == Some(
+                            session
+                                .user
+                                .id,
+                        )
+            })
+            .collect();
         let grouped = db::StreamGroup::filter_sources(
             &state
                 .ctx
@@ -1959,6 +1998,21 @@ async fn item_for_user(
                     .db,
             )
             .await?;
+        let raw = raw
+            .into_iter()
+            .filter(|source| {
+                !state
+                    .ctx
+                    .config
+                    .tenant_streams
+                    || source.user_id
+                        == Some(
+                            session
+                                .user
+                                .id,
+                        )
+            })
+            .collect();
         let grouped = db::StreamGroup::filter_sources(
             &state
                 .ctx

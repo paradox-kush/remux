@@ -2789,7 +2789,7 @@ impl Media {
                 external_ids, external_ratings, created_at, updated_at, certification, certification_age, parent_idx,
                 live_start, live_end, tvg_id, channel_number, enabled, sort_order, custom_name, digital_released_at, status, refreshed_at, grandparent_id, country, program_kind, collection_latest_auto_unplayed, collection_latest_sort_digital,
                 collection_default_sort, collection_default_sort_order,
-                original_language, is_locked, locked_fields, album_kind, end_date
+                original_language, is_locked, locked_fields, album_kind, end_date, user_id
             )",
         );
 
@@ -2846,7 +2846,12 @@ impl Media {
                     .push_bind(&item.is_locked)
                     .push_bind(sqlx::types::Json(&item.locked_fields))
                     .push_bind(&item.album_kind)
-                    .push_bind(&item.end_date);
+                    .push_bind(&item.end_date)
+                    .push_bind(if item.kind == MediaKind::Stream {
+                        item.user_id
+                    } else {
+                        None
+                    });
             });
 
             query_builder.push(
@@ -2894,7 +2899,8 @@ impl Media {
                 locked_fields = CASE WHEN media.id IS NOT NULL THEN media.locked_fields ELSE excluded.locked_fields END,
                 collection_image_config = COALESCE(media.collection_image_config, excluded.collection_image_config),
                 album_kind = COALESCE(excluded.album_kind, media.album_kind),
-                end_date = COALESCE(excluded.end_date, media.end_date)",
+                end_date = COALESCE(excluded.end_date, media.end_date),
+                user_id = COALESCE(excluded.user_id, media.user_id)",
             );
 
             query_builder
@@ -3566,8 +3572,18 @@ impl Media {
         user: &super::User,
         items: &[Media],
     ) -> Result<HashSet<Uuid>> {
+        let owner_hidden: HashSet<Uuid> = items
+            .iter()
+            .filter(|m| {
+                m.kind == MediaKind::Stream
+                    && m.user_id
+                        .is_some()
+                    && m.user_id != Some(user.id)
+            })
+            .map(|m| m.id)
+            .collect();
         let Some(policy_filter) = user_policy_filter(user) else {
-            return Ok(HashSet::new());
+            return Ok(owner_hidden);
         };
 
         // Titles are what a policy rates: playable items and the folders that
@@ -3589,7 +3605,7 @@ impl Media {
             })
             .collect();
         if titles.is_empty() {
-            return Ok(HashSet::new());
+            return Ok(owner_hidden);
         }
 
         let visible: HashSet<Uuid> = Self::get_by_filter(
@@ -3614,6 +3630,7 @@ impl Media {
             .into_iter()
             .filter(|(_, title)| !visible.contains(title))
             .map(|(item, _)| item)
+            .chain(owner_hidden)
             .collect())
     }
 
@@ -12953,6 +12970,44 @@ mod genre_ids_filter_tests {
     /// pass, a title without a database row (a remote search result) counts as
     /// hidden, and a policy that restricts nothing (or only hides collections)
     /// hides nothing.
+    #[tokio::test]
+    async fn tenant_stream_ownership_is_enforced_even_without_a_rating_policy() {
+        let db = crate::db::connect("sqlite::memory:", 10_000)
+            .await
+            .unwrap();
+        let user = super::super::User {
+            id: Uuid::new_v4(),
+            ..Default::default()
+        };
+        let owned = Media {
+            id: Uuid::new_v4(),
+            kind: MediaKind::Stream,
+            user_id: Some(user.id),
+            ..Default::default()
+        };
+        let foreign = Media {
+            id: Uuid::new_v4(),
+            kind: MediaKind::Stream,
+            user_id: Some(Uuid::new_v4()),
+            ..Default::default()
+        };
+        let public = Media {
+            id: Uuid::new_v4(),
+            kind: MediaKind::Movie,
+            ..Default::default()
+        };
+        let hidden = Media::hidden_by_policy(
+            &db,
+            &user,
+            &[owned.clone(), foreign.clone(), public.clone()],
+        )
+        .await
+        .unwrap();
+        assert!(hidden.contains(&foreign.id));
+        assert!(!hidden.contains(&owned.id));
+        assert!(!hidden.contains(&public.id));
+    }
+
     #[tokio::test]
     async fn hidden_by_policy_follows_the_listing_rules() {
         let db = crate::db::connect("sqlite::memory:", 10_000)

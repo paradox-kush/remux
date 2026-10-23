@@ -1,0 +1,42 @@
+name: Bridge tenant isolation gate
+on:
+  push:
+    branches: [fix/tenant-stream-cache]
+  workflow_dispatch:
+concurrency:
+  group: bridge-tenants-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_INCREMENTAL: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: bridge-tenants
+      - run: cargo test --locked -p remux-server --lib tenant_stream -j 2
+      - run: cargo test --locked -p remux-server --lib direct_only -j 2
+      - run: cargo build --locked -p remux-server -j 2
+      - run: python3 tests/direct_tenant_gate.py target/debug/remux-server
+      - name: Package verified server and source
+        run: |
+          mkdir -p bridge-artifact
+          cp target/debug/remux-server bridge-artifact/
+          strip bridge-artifact/remux-server
+          git archive --format=tar.gz HEAD > bridge-artifact/source.tar.gz
+          cp LICENSE bridge-artifact/
+          git rev-parse HEAD > bridge-artifact/source-commit.txt
+          sha256sum bridge-artifact/remux-server > bridge-artifact/binary-sha256.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bridge-linux-amd64
+          path: bridge-artifact/
+          retention-days: 7
