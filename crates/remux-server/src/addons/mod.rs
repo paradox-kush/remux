@@ -3513,6 +3513,19 @@ impl AddonService {
         };
         info!(streams = deduped.len(), ?sources, elapsed = ?instant.elapsed(), "streams synced");
         if deduped.is_empty() {
+            if let Some(key) = tenant_cache {
+                sqlx::query("DELETE FROM media WHERE kind = 'stream' AND parent_id = ? AND user_id = ?")
+                    .bind(media.id).bind(user_id).execute(&ctx.db).await?;
+                let now = chrono::Utc::now().naive_utc();
+                media.streams_refreshed_at = Some(now);
+                media.sources = Some(vec![]);
+                ctx.store
+                    .save(
+                        key,
+                        now,
+                        std::time::Duration::from_secs(STREAMS_TTL_SECS as u64),
+                    );
+            }
             return Ok(());
         }
 
