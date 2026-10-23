@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import secrets
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -121,8 +122,14 @@ def main():
                     assert f'tenant-{other}.example' not in serialized,'Cross-tenant PlaybackInfo leak'
                     return body
                 pa=playback('a');pb=playback('b');playback('a')
-                source_a,source_b=pa['MediaSources'][0]['Id'],pb['MediaSources'][0]['Id']
-                assert source_a!=source_b,'Shared private stream IDs'
+                # Jellyfin compatibility may alias the first source Id to the public title Id.
+                # Validate the actual persisted private source IDs, including a forged foreign ID.
+                with sqlite3.connect('file:'+str(root/'db.sqlite')+'?mode=ro',uri=True) as db:
+                    rows=db.execute("select lower(hex(id)), lower(hex(user_id)) from media where kind='stream'").fetchall()
+                source_sets={key:{source for source,owner in rows if owner==users[key]['User']['Id'].replace('-','').lower()} for key in ('a','b')}
+                assert source_sets['a'] and source_sets['b'],'Stream owner missing from storage'
+                assert source_sets['a'].isdisjoint(source_sets['b']),'Shared private stream IDs'
+                source_b=next(iter(source_sets['b']))
                 status,_,headers=request('/videos/'+movie+'/stream.mp4?'+urlencode({'Static':'true','MediaSourceId':source_b}),token=a['AccessToken'],device='a-phone')
                 assert status>=400,'Cross-tenant source ID was accepted'
                 status,data,_=request('/items/'+source_b+'?Fields=MediaSources',token=a['AccessToken'],device='a-phone')

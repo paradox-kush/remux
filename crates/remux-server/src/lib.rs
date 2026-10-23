@@ -292,6 +292,13 @@ pub async fn init_app(
     info!("Running database migrations. Do not interrupt!");
     db::migrate(&conn).await?;
     info!("migrations complete");
+    if config.tenant_streams {
+        // Older direct-only builds did not label derived source rows with an owner.
+        // Refetch these caches instead of exposing unowned legacy URLs on a shared server.
+        sqlx::query("DELETE FROM media WHERE kind = 'stream' AND user_id IS NULL")
+            .execute(&conn)
+            .await?;
+    }
 
     // Checkpoint the WAL before accepting any requests. At this point no
     // other readers exist, so TRUNCATE is guaranteed to succeed and the WAL
