@@ -3359,13 +3359,38 @@ impl AddonService {
         const STREAMS_TTL_SECS: i64 = 60;
         static STREAM_LOCKS: KeyedLock<Uuid> = KeyedLock::new();
 
+        // Shared bridge users must never reuse another user's freshness marker or sources.
+        let tenant_cache = if ctx
+            .config
+            .tenant_streams
+        {
+            let uid = user_id
+                .ok_or_else(|| anyhow!("authenticated stream owner required"))?;
+            let assigned = addon::user_addon_override(&ctx.db, uid).await?;
+            Some(format!(
+                "tenant-streams:{}:{}:{:?}",
+                uid, media.id, assigned
+            ))
+        } else {
+            None
+        };
+        if let Some(key) = &tenant_cache {
+            if let Some(refreshed) = ctx
+                .store
+                .get::<chrono::NaiveDateTime>(key)
+            {
+                media.streams_refreshed_at = Some(*refreshed);
+                media.sources = None;
+                return Ok(());
+            }
+        }
         // Fast path: TTL not expired — skip the lock entirely.
         let is_fresh = |refreshed: Option<chrono::NaiveDateTime>| {
             refreshed.is_some_and(|r| {
                 (chrono::Utc::now().naive_utc() - r).num_seconds() < STREAMS_TTL_SECS
             })
         };
-        if is_fresh(media.streams_refreshed_at) {
+        if tenant_cache.is_none() && is_fresh(media.streams_refreshed_at) {
             return Ok(());
         }
 
@@ -3384,7 +3409,7 @@ impl AddonService {
         .ok()
         .flatten()
         .flatten();
-        if is_fresh(refreshed_at) {
+        if tenant_cache.is_none() && is_fresh(refreshed_at) {
             media.streams_refreshed_at = refreshed_at;
             return Ok(());
         }
@@ -3498,6 +3523,7 @@ impl AddonService {
             .execute(&ctx.db)
             .await?;
         media.streams_refreshed_at = Some(now);
+        media.sources = None;
         let mut sources: Vec<db::Media> = deduped
             .into_iter()
             .enumerate()
@@ -3506,6 +3532,15 @@ impl AddonService {
                 // the same UUID across refreshes, enabling safe upsert semantics.
                 let id_key = Self::stream_dedup_key(&s)
                     .unwrap_or_else(|| format!("source_{idx}"));
+                let id_key = if ctx
+                    .config
+                    .tenant_streams
+                {
+                    s.user_id = user_id;
+                    format!("{}:{}", user_id.expect("validated stream owner"), id_key)
+                } else {
+                    id_key
+                };
                 s.id = Uuid::new_v5(&media.id, id_key.as_bytes());
                 s.parent_id = Some(media.id);
                 s.runtime = media.runtime;
@@ -3532,6 +3567,14 @@ impl AddonService {
         }
 
         db::Media::upsert(&ctx.db, &sources).await?;
+        if let Some(key) = tenant_cache {
+            ctx.store
+                .save(
+                    key,
+                    now,
+                    std::time::Duration::from_secs(STREAMS_TTL_SECS as u64),
+                );
+        }
 
         // delete stale items
         sqlx::query(

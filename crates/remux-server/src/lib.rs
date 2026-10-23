@@ -285,6 +285,10 @@ pub async fn init_app(
     )
     .await?;
 
+    anyhow::ensure!(
+        !config.tenant_streams || config.direct_only,
+        "tenant_streams requires direct_only"
+    );
     info!("Running database migrations. Do not interrupt!");
     db::migrate(&conn).await?;
     info!("migrations complete");
@@ -600,6 +604,9 @@ pub struct Config {
     /// An operator setting, independent of mutable addon/user encoding settings.
     #[serde(default)]
     pub direct_only: bool,
+    /// Isolate cached provider streams by authenticated user on shared direct-only servers.
+    #[serde(default)]
+    pub tenant_streams: bool,
     #[serde(default = "default_data_dir")]
     pub data_dir: std::path::PathBuf,
     /// `None` means derive from `data_dir` — call `resolve()` after loading.
@@ -766,6 +773,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             direct_only: false,
+            tenant_streams: false,
             data_dir: default_data_dir(),
             database_url: None,
             torrent_data_dir: None,

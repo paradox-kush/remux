@@ -297,6 +297,16 @@ impl StreamService {
             db_streams
         };
 
+        let raw = raw
+            .into_iter()
+            .filter(|source| {
+                !self
+                    .ctx
+                    .config
+                    .tenant_streams
+                    || source.user_id == self.user_id
+            })
+            .collect();
         let streams = db::StreamGroup::filter_sources(
             &self
                 .ctx
@@ -364,8 +374,23 @@ impl StreamService {
         let media = crate::services::MediaResolveService::resolve_item(lookup_id, ctx)
             .await?
             .ok_or_else(|| anyhow::anyhow!("stream not found: {}", lookup_id))?;
-        Self::dispatch_lookup(ctx, item_id, requested_id, device_key, user_id, media)
-            .await
+        let source = Self::dispatch_lookup(
+            ctx,
+            item_id,
+            requested_id,
+            device_key,
+            user_id,
+            media,
+        )
+        .await?;
+        if ctx
+            .config
+            .tenant_streams
+            && (user_id.is_none() || source.user_id != user_id)
+        {
+            anyhow::bail!("stream not found");
+        }
+        Ok(source)
     }
 
     async fn dispatch_lookup(
@@ -392,6 +417,14 @@ impl StreamService {
                         .await
                         .unwrap_or_default();
                 candidates.extend(cascade);
+                candidates.retain(|source| {
+                    !ctx.config
+                        .tenant_streams
+                        || source.user_id == user_id
+                });
+                if candidates.is_empty() {
+                    anyhow::bail!("stream not found");
+                }
                 Ok(candidates.remove(0))
             }
             db::MediaKind::Movie
@@ -406,9 +439,16 @@ impl StreamService {
                     .refresh_streams(&mut media, ctx, user_id)
                     .await
                     .inspect_err(|e| tracing::error!("refresh_streams failed: {e:#}"));
-                let sources = media
+                let sources: Vec<_> = media
                     .streams(&ctx.db)
-                    .await?;
+                    .await?
+                    .into_iter()
+                    .filter(|source| {
+                        !ctx.config
+                            .tenant_streams
+                            || source.user_id == user_id
+                    })
+                    .collect();
                 // Here `requested_id` resolved to a Movie/Episode/Track, so it
                 // is an *item* id (auto-play, or the PlaybackInfo rewrite of
                 // source[0].Id — the sibling item's UUID when duplicate items
@@ -480,6 +520,16 @@ impl StreamService {
         .await
         .unwrap_or_default();
         candidates.extend(cascade);
+        candidates.retain(|source| {
+            !self
+                .ctx
+                .config
+                .tenant_streams
+                || source.user_id == self.user_id
+        });
+        if candidates.is_empty() {
+            anyhow::bail!("stream not found");
+        }
         self.stream = Some(candidates[0].clone());
         self.group = Some((gid, gtitle, candidates));
         Ok(())

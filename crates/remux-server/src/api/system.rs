@@ -76,40 +76,56 @@ pub async fn system_info_public(
             .db,
     )
     .await?;
-    Ok(Json(api::PublicSystemInfo {
-        // Jellyfin clients persist LocalAddress as part of the server identity.
-        // Report the request authority so saved authentication state remains
-        // associated with the endpoint the client actually reached.
-        local_address: request_local_address(
-            &headers,
-            state
-                .ctx
-                .config
-                .port,
-        ),
-        server_name: config
-            .server_name
-            .unwrap_or_default(),
-        product_name: "Jellyfin Server".to_string(),
-        startup_wizard_completed: config
-            .is_startup_wizard_completed
-            .unwrap_or(false),
-        // some clients dont like adding a suffix like "-remux"
-        version: state
+    let tenant_streams = if state
+        .ctx
+        .config
+        .tenant_streams
+        && state
             .ctx
             .config
-            .jellyfin_version
-            .clone(),
-        remux_version: env!("CARGO_PKG_VERSION").to_string(),
-        id: server_id(),
-        remux_started_at: Some(
-            state
+            .direct_only
+    {
+        "1"
+    } else {
+        "0"
+    };
+    Ok((
+        [("x-tuvora-tenant-streams", tenant_streams)],
+        Json(api::PublicSystemInfo {
+            // Jellyfin clients persist LocalAddress as part of the server identity.
+            // Report the request authority so saved authentication state remains
+            // associated with the endpoint the client actually reached.
+            local_address: request_local_address(
+                &headers,
+                state
+                    .ctx
+                    .config
+                    .port,
+            ),
+            server_name: config
+                .server_name
+                .unwrap_or_default(),
+            product_name: "Jellyfin Server".to_string(),
+            startup_wizard_completed: config
+                .is_startup_wizard_completed
+                .unwrap_or(false),
+            // some clients dont like adding a suffix like "-remux"
+            version: state
                 .ctx
-                .started_at
-                .to_rfc3339(),
-        ),
-        ..Default::default()
-    }))
+                .config
+                .jellyfin_version
+                .clone(),
+            remux_version: env!("CARGO_PKG_VERSION").to_string(),
+            id: server_id(),
+            remux_started_at: Some(
+                state
+                    .ctx
+                    .started_at
+                    .to_rfc3339(),
+            ),
+            ..Default::default()
+        }),
+    ))
 }
 
 #[get("/system/ping")]

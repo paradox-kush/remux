@@ -3566,8 +3566,18 @@ impl Media {
         user: &super::User,
         items: &[Media],
     ) -> Result<HashSet<Uuid>> {
+        let owner_hidden: HashSet<Uuid> = items
+            .iter()
+            .filter(|m| {
+                m.kind == MediaKind::Stream
+                    && m.user_id
+                        .is_some()
+                    && m.user_id != Some(user.id)
+            })
+            .map(|m| m.id)
+            .collect();
         let Some(policy_filter) = user_policy_filter(user) else {
-            return Ok(HashSet::new());
+            return Ok(owner_hidden);
         };
 
         // Titles are what a policy rates: playable items and the folders that
@@ -3589,7 +3599,7 @@ impl Media {
             })
             .collect();
         if titles.is_empty() {
-            return Ok(HashSet::new());
+            return Ok(owner_hidden);
         }
 
         let visible: HashSet<Uuid> = Self::get_by_filter(
@@ -3614,6 +3624,7 @@ impl Media {
             .into_iter()
             .filter(|(_, title)| !visible.contains(title))
             .map(|(item, _)| item)
+            .chain(owner_hidden)
             .collect())
     }
 
@@ -12953,6 +12964,44 @@ mod genre_ids_filter_tests {
     /// pass, a title without a database row (a remote search result) counts as
     /// hidden, and a policy that restricts nothing (or only hides collections)
     /// hides nothing.
+    #[tokio::test]
+    async fn tenant_stream_ownership_is_enforced_even_without_a_rating_policy() {
+        let db = crate::db::connect("sqlite::memory:", 10_000)
+            .await
+            .unwrap();
+        let user = super::super::User {
+            id: Uuid::new_v4(),
+            ..Default::default()
+        };
+        let owned = Media {
+            id: Uuid::new_v4(),
+            kind: MediaKind::Stream,
+            user_id: Some(user.id),
+            ..Default::default()
+        };
+        let foreign = Media {
+            id: Uuid::new_v4(),
+            kind: MediaKind::Stream,
+            user_id: Some(Uuid::new_v4()),
+            ..Default::default()
+        };
+        let public = Media {
+            id: Uuid::new_v4(),
+            kind: MediaKind::Movie,
+            ..Default::default()
+        };
+        let hidden = Media::hidden_by_policy(
+            &db,
+            &user,
+            &[owned.clone(), foreign.clone(), public.clone()],
+        )
+        .await
+        .unwrap();
+        assert!(hidden.contains(&foreign.id));
+        assert!(!hidden.contains(&owned.id));
+        assert!(!hidden.contains(&public.id));
+    }
+
     #[tokio::test]
     async fn hidden_by_policy_follows_the_listing_rules() {
         let db = crate::db::connect("sqlite::memory:", 10_000)
