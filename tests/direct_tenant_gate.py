@@ -110,9 +110,31 @@ def main():
                         ok('/users/'+user['Id']+'/addons',[addon['id']],token=admin)
                         users[key]=ok('/users/authenticatebyname',{'Username':'tenant-'+key,'Pw':password},device=key+'-phone')
                 a,b=users['a'],users['b']
-                items=ok('/items?'+urlencode({'SearchTerm':'Synthetic POC','IncludeItemTypes':'Movie','Recursive':'true'}),token=a['AccessToken'],device='a-phone')['Items']
+                # A fresh lazy library has no cached titles yet. It must still be
+                # discoverable by ordinary Jellyfin clients before the first search.
+                views=ok('/users/'+a['User']['Id']+'/views',token=a['AccessToken'],device='a-phone')['Items']
+                libraries={view.get('CollectionType'):view for view in views}
+                assert 'movies' in libraries and 'tvshows' in libraries, ('Fresh virtual libraries hidden',[(v.get('Name'),v.get('CollectionType')) for v in views])
+                items=ok('/items?'+urlencode({'SearchTerm':'Synthetic POC','IncludeItemTypes':'Movie','Recursive':'true','ParentId':libraries['movies']['Id']}),token=a['AccessToken'],device='a-phone')['Items']
                 assert items,'No synthetic movie'
                 movie=items[0]['Id']
+                wrong_kind=ok('/items?'+urlencode({'SearchTerm':'Synthetic POC','IncludeItemTypes':'Series','Recursive':'true','ParentId':libraries['movies']['Id']}),token=a['AccessToken'],device='a-phone')['Items']
+                assert not wrong_kind,'TV series escaped into the movie library search'
+                default_kinds=ok('/items?'+urlencode({'SearchTerm':'Synthetic POC','Recursive':'true','ParentId':libraries['movies']['Id']}),token=a['AccessToken'],device='a-phone')['Items']
+                assert default_kinds and all(item['Type']=='Movie' for item in default_kinds),'Untyped search escaped movie scope'
+                wrong_movie=ok('/items?'+urlencode({'SearchTerm':'Synthetic POC','IncludeItemTypes':'Movie','Recursive':'true','ParentId':libraries['tvshows']['Id']}),token=a['AccessToken'],device='a-phone')['Items']
+                assert not wrong_movie,'Movie escaped into TV library search'
+                shows=ok('/items?'+urlencode({'SearchTerm':'Synthetic POC','IncludeItemTypes':'Series','Recursive':'true','ParentId':libraries['tvshows']['Id']}),token=a['AccessToken'],device='a-phone')['Items']
+                assert shows,'No synthetic series through TV library'
+                episodes=ok('/shows/'+shows[0]['Id']+'/episodes?'+urlencode({'UserId':a['User']['Id'],'Season':1}),token=a['AccessToken'],device='a-phone')['Items']
+                episode=next((e for e in episodes if e.get('ParentIndexNumber')==1 and e.get('IndexNumber')==1),None)
+                assert episode,'Series did not resolve season 1 episode 1'
+                episode_info=ok('/items/'+episode['Id']+'/playbackinfo',{'UserId':a['User']['Id'],'IsPlayback':True},token=a['AccessToken'],device='a-phone')
+                assert 'tenant-a.example' in json.dumps(episode_info),'Episode has no direct source'
+                assert 'tenant-b.example' not in json.dumps(episode_info),'Foreign episode source'
+                if len(sys.argv)>2:
+                    # Synthetic wire evidence for client deserialization/lookup tests.
+                    Path(sys.argv[2]).write_text(json.dumps({'views':{'Items':views},'movie':{'Items':items},'series':{'Items':shows},'episodes':{'Items':episodes},'episodePlayback':episode_info}))
                 def playback(key):
                     session=users[key]
                     body=ok('/items/'+movie+'/playbackinfo',{'UserId':session['User']['Id'],'IsPlayback':True},token=session['AccessToken'],device=key+'-phone')
@@ -147,7 +169,7 @@ def main():
                 playback('a')
                 assert not (root/'media-attempts').exists(),'Media process invoked'
                 assert not any(e['path'].startswith('/media/') for e in provider.EVENTS),'Media origin requested'
-                print(json.dumps({'passed':True,'checks':['same-title A/B/A cache isolation','distinct tenant stream IDs','foreign source ID denied','foreign source detail denied','foreign source listing scrubbed','parallel playback metadata isolated','item MediaSources isolated','empty addon cannot reuse cached streams','other user survives addon changes'],'media_origin_requests':0,'media_process_attempts':0}))
+                print(json.dumps({'passed':True,'checks':['fresh Movies/Shows discovery','movie lookup scoped to library','contradictory and untyped searches respect library kind','series to episode to direct playback metadata','same-title A/B/A cache isolation','distinct tenant stream IDs','foreign source ID denied','foreign source detail denied','foreign source listing scrubbed','parallel playback metadata isolated','item MediaSources isolated','empty addon cannot reuse cached streams','other user survives addon changes'],'media_origin_requests':0,'media_process_attempts':0}))
             finally:
                 server.terminate()
                 try:

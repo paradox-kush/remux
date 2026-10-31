@@ -1,7 +1,7 @@
 name: Bridge tenant isolation gate
 on:
   push:
-    branches: [fix/tenant-stream-cache]
+    branches: [poc/direct-only, fix/tenant-stream-cache, fix/virtual-playback-libraries]
   workflow_dispatch:
 concurrency:
   group: bridge-tenants-${{ github.ref }}
@@ -24,6 +24,8 @@ jobs:
           key: bridge-tenants
       - run: cargo test --locked -p remux-server --lib tenant_stream -j 2
       - run: cargo test --locked -p remux-server --lib direct_only -j 2
+      - run: cargo test --locked -p remux-server --lib virtual_library_roots -j 2
+      - run: cargo test --locked -p remux-server --lib userviews -j 2
       - run: cargo build --locked -p remux-server -j 2
       - run: python3 tests/direct_tenant_gate.py target/debug/remux-server
       - name: Package verified server and source
