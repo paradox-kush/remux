@@ -51,6 +51,14 @@ pub async fn user_configuration_update(
             .db,
         target_id,
         &mut payload,
+        state
+            .ctx
+            .config
+            .direct_only
+            && state
+                .ctx
+                .config
+                .tenant_streams,
     )
     .await?;
     db::User::save_configuration(
@@ -85,6 +93,14 @@ pub async fn user_configuration_legacy(
             .db,
         target_id,
         &mut payload,
+        state
+            .ctx
+            .config
+            .direct_only
+            && state
+                .ctx
+                .config
+                .tenant_streams,
     )
     .await?;
     db::User::save_configuration(
@@ -1359,6 +1375,7 @@ async fn default_userviews(
     user_id: Uuid,
     policy: Option<&api::UserPolicy>,
     excluded_view_ids: Option<&[Uuid]>,
+    virtual_libraries: bool,
 ) -> Result<(Vec<db::Media>, bool)> {
     // When the policy restricts folder access, scope the DB query to only those
     // views — this avoids counting children for every promoted collection.
@@ -1408,6 +1425,45 @@ async fn default_userviews(
 
     let mut libraries = library_result?.records;
 
+    // Lazy direct-only libraries have no cached children until the first search.
+    // Keep the two seeded roots discoverable so standard Jellyfin clients can
+    // scope that search. Reuse the same filters: no policy/hidden-view bypass.
+    if virtual_libraries && policy.map_or(true, |p| p.enable_remote_search) {
+        let roots = [
+            Uuid::from_u128(0xa1b2c3d4000040008000000000000001),
+            Uuid::from_u128(0xa1b2c3d4000040008000000000000002),
+        ];
+        let ids = roots
+            .into_iter()
+            .filter(|id| {
+                enabled_view_ids
+                    .as_ref()
+                    .map_or(true, |allowed| allowed.contains(id))
+            })
+            .collect::<Vec<_>>();
+        if !ids.is_empty() {
+            let empty_roots = db::Media::get_by_filter(
+                db,
+                &db::MediaFilter {
+                    id: Some(ids),
+                    exclude_childless: false,
+                    ..library_filter.clone()
+                },
+            )
+            .await?
+            .records;
+            for root in empty_roots {
+                if !libraries
+                    .iter()
+                    .any(|m| m.id == root.id)
+                {
+                    libraries.push(root);
+                }
+            }
+            libraries.sort_by_key(|m| m.sort_order);
+        }
+    }
+
     // Safety net: reuse the same ID sets that were pushed into the DB query.
     if let Some(allowed) = &enabled_view_ids {
         libraries.retain(|m| allowed.contains(&m.id));
@@ -1443,6 +1499,7 @@ async fn normalize_ordered_views(
     db: &sqlx::SqlitePool,
     target_id: Uuid,
     payload: &mut api::UserConfiguration,
+    virtual_libraries: bool,
 ) -> Result<()> {
     if payload
         .ordered_views
@@ -1472,8 +1529,14 @@ async fn normalize_ordered_views(
     // regardless of where (or whether) it appears in `posted`, so it never
     // affects whether an override actually changes anything — left out of
     // this comparison entirely rather than tacked onto both sides.
-    let (libraries, _has_channels) =
-        default_userviews(db, target_id, target_policy.as_ref(), excluded).await?;
+    let (libraries, _has_channels) = default_userviews(
+        db,
+        target_id,
+        target_policy.as_ref(),
+        excluded,
+        virtual_libraries,
+    )
+    .await?;
     let default_ids: Vec<Uuid> = libraries
         .into_iter()
         .map(|m| m.id)
@@ -1538,6 +1601,14 @@ pub async fn userviews(
             .id,
         policy,
         excluded_view_ids.as_deref(),
+        state
+            .ctx
+            .config
+            .direct_only
+            && state
+                .ctx
+                .config
+                .tenant_streams,
     )
     .await?;
 
@@ -4464,6 +4535,82 @@ mod e2e_tests {
             .as_str()
             .unwrap()
             .to_string()
+    }
+
+    #[tokio::test]
+    async fn virtual_library_roots_respect_policy_and_hidden_views() {
+        let (_server, ctx, _token) = authenticated_server().await;
+        let db = &ctx
+            .0
+            .db;
+        let user: db::User = sqlx::query_as("SELECT * FROM users LIMIT 1")
+            .fetch_one(db)
+            .await
+            .unwrap();
+        let movie = Uuid::from_u128(0xa1b2c3d4000040008000000000000001);
+        let series = Uuid::from_u128(0xa1b2c3d4000040008000000000000002);
+        let (normal, _) = default_userviews(db, user.id, None, None, false)
+            .await
+            .unwrap();
+        assert!(
+            !normal
+                .iter()
+                .any(|m| m.id == movie || m.id == series)
+        );
+        let (virtuals, _) = default_userviews(db, user.id, None, None, true)
+            .await
+            .unwrap();
+        assert!(
+            virtuals
+                .iter()
+                .any(|m| m.id == movie)
+        );
+        assert!(
+            virtuals
+                .iter()
+                .any(|m| m.id == series)
+        );
+        assert_eq!(
+            virtuals
+                .iter()
+                .filter(|m| m.id == movie)
+                .count(),
+            1
+        );
+        let (hidden, _) = default_userviews(db, user.id, None, Some(&[movie]), true)
+            .await
+            .unwrap();
+        assert!(
+            !hidden
+                .iter()
+                .any(|m| m.id == movie)
+        );
+        assert!(
+            hidden
+                .iter()
+                .any(|m| m.id == series)
+        );
+        let mut policy = api::UserPolicy {
+            enable_all_folders: false,
+            enabled_folders: vec![movie.to_string()],
+            enable_remote_search: true,
+            ..Default::default()
+        };
+        let (restricted, _) = default_userviews(db, user.id, Some(&policy), None, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            restricted
+                .iter()
+                .map(|m| m.id)
+                .collect::<Vec<_>>(),
+            vec![movie]
+        );
+        policy.enable_remote_search = false;
+        let (local_only, _) = default_userviews(db, user.id, Some(&policy), None, true)
+            .await
+            .unwrap();
+        assert!(local_only.is_empty());
     }
 
     /// `MyMediaExcludes` hides views; `includeHidden=true` restores them.
