@@ -1460,7 +1460,16 @@ async fn default_userviews(
                     libraries.push(root);
                 }
             }
-            libraries.sort_by_key(|m| m.sort_order);
+            libraries.sort_by_key(|m| {
+                (
+                    m.sort_order
+                        .is_none(),
+                    m.sort_order
+                        .unwrap_or(999999),
+                    m.title
+                        .to_ascii_lowercase(),
+                )
+            });
         }
     }
 

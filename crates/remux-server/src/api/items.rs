@@ -34,6 +34,40 @@ pub struct ItemsQueryResult {
     pub total_count: i64,
 }
 
+/// Remote lookup must respect a typed smart library just like its local browse query.
+fn scope_library_search_kinds(
+    kinds: &mut Vec<db::MediaKind>,
+    parent: Option<&db::Media>,
+) {
+    let Some(parent) = parent.filter(|p| {
+        p.kind == db::MediaKind::Collection
+            && p.collection_kind == Some(db::CollectionKind::Smart)
+    }) else {
+        return;
+    };
+    match parent.collection_media_kind {
+        Some(db::CollectionMediaKind::Movie) => {
+            kinds.retain(|k| *k == db::MediaKind::Movie)
+        }
+        Some(db::CollectionMediaKind::Series) => kinds.retain(|k| {
+            matches!(
+                k,
+                db::MediaKind::Series | db::MediaKind::Season | db::MediaKind::Episode
+            )
+        }),
+        Some(db::CollectionMediaKind::Mixed) => kinds.retain(|k| {
+            matches!(
+                k,
+                db::MediaKind::Movie
+                    | db::MediaKind::Series
+                    | db::MediaKind::Season
+                    | db::MediaKind::Episode
+            )
+        }),
+        _ => {}
+    }
+}
+
 fn apply_permissions(item: &mut api::BaseItemDto, user: &db::User) {
     item.can_delete = Some(
         db::Media::can_delete(user)
@@ -346,7 +380,7 @@ pub async fn get_items(
 
             // Requested kinds: explicit from the client, or fall back to the computed
             // defaults (Movie + Series + Episode with exclude_item_types already applied).
-            let requested_kinds: Vec<db::MediaKind> = if raw_types.is_empty() {
+            let mut requested_kinds: Vec<db::MediaKind> = if raw_types.is_empty() {
                 types
                     .iter()
                     .filter_map(|t| db::MediaKind::try_from(t.clone()).ok())
@@ -363,6 +397,7 @@ pub async fn get_items(
                     .collect()
             };
 
+            scope_library_search_kinds(&mut requested_kinds, parent.as_ref());
             let (mut remote_kinds, mut local_kinds): (Vec<_>, Vec<_>) = requested_kinds
                 .into_iter()
                 .partition(|k| is_remote_enabled(&cfg, k));
@@ -3934,6 +3969,26 @@ pub async fn media_segments(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn typed_library_search_stays_scoped() {
+        let parent = crate::db::Media {
+            kind: crate::db::MediaKind::Collection,
+            collection_kind: Some(crate::db::CollectionKind::Smart),
+            collection_media_kind: Some(crate::db::CollectionMediaKind::Movie),
+            ..Default::default()
+        };
+        let mut kinds = vec![crate::db::MediaKind::Movie, crate::db::MediaKind::Series];
+        super::scope_library_search_kinds(&mut kinds, Some(&parent));
+        assert_eq!(kinds, vec![crate::db::MediaKind::Movie]);
+        let mut contradictory = vec![crate::db::MediaKind::Series];
+        super::scope_library_search_kinds(&mut contradictory, Some(&parent));
+        assert!(contradictory.is_empty());
+        let mut unscoped =
+            vec![crate::db::MediaKind::Movie, crate::db::MediaKind::Series];
+        super::scope_library_search_kinds(&mut unscoped, None);
+        assert_eq!(unscoped.len(), 2);
+    }
+
     use super::{
         RemoteImagesQuery, exclude_episodes_from_search, external_id_infos_for_kind,
         is_remote_enabled,
